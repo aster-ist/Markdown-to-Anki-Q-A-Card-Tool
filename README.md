@@ -1,22 +1,24 @@
-# Markdown 转 Anki 问答卡片工具
+# Markdown to Anki Q&A Card Tool
 
-这是一个 Python 命令行工具，用于把 Markdown 笔记转换成可导入 Anki 的 `.apkg` 包。当前版本使用 Moonshot 兼容的 Chat Completions 接口，生成 Front/Back 问答卡片，支持双语内容、标签和补充说明。
+[中文说明](./README.md)
 
-## 功能特性
+This is a Python command-line tool that converts Markdown notes into Anki `.apkg` packages. The current version uses a Moonshot-compatible Chat Completions API and generates Front/Back Q&A cards with bilingual support, tags, and optional extra notes.
 
-- 读取本地 Markdown 文件并按标题/长度分块
-- 调用 LLM 自动提取核心知识点
-- 生成 Front/Back 问答卡片，而不是 Cloze 填空卡片
-- 支持 `extra` 补充说明、`source` 来源、`tags` 标签
-- 导出为可直接导入 Anki 的 `.apkg` 文件
-- 对缺失配置、非法 JSON 和字段缺失提供更清晰的错误提示
+## Features
 
-## 环境要求
+- Read local Markdown files and split them by headings and chunk length
+- Use an LLM to extract the most important knowledge points
+- Generate Front/Back Q&A cards instead of Cloze cards
+- Support `extra`, `source`, and `tags` fields
+- Export directly to an importable `.apkg` file
+- Provide clearer errors for missing config, invalid JSON, and missing fields
+
+## Requirements
 
 - Python 3.9+
-- 建议使用虚拟环境
+- A virtual environment is recommended
 
-## 安装
+## Installation
 
 ```bash
 python -m venv venv
@@ -24,9 +26,9 @@ venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-## 配置
+## Configuration
 
-复制 `.env.example` 为 `.env`，然后填写你的真实配置：
+Copy `.env.example` to `.env`, then fill in your real values:
 
 ```env
 LLM_API_KEY=your_api_key_here
@@ -35,69 +37,70 @@ LLM_MODEL=kimi-k2.5
 LLM_TIMEOUT=120
 ```
 
-如果只想快速更新 API Key，可以运行：
+If you only want to update the API key quickly, run:
 
 ```bash
 python setup_api_key.py
 ```
 
-这个脚本会更新 `LLM_API_KEY`，同时保留已有的 `LLM_BASE_URL`，如果没有则补上 Moonshot 默认地址。
+The helper script updates `LLM_API_KEY`, preserves the existing `LLM_BASE_URL`, and adds the default Moonshot URL if it is missing.
 
-## 用法
+## Usage
 
 ```bash
 python md_to_anki.py <input.md> <output.apkg>
 ```
 
-示例：
+Example:
 
 ```bash
 python md_to_anki.py test_sample.md output.apkg
 ```
 
-执行流程：
+What the script does:
 
-1. 读取 Markdown 文件
-2. 按标题与长度切分文本块
-3. 调用 LLM 生成问答卡片 JSON
-4. 将卡片写入 Anki 牌组
-5. 导出 `.apkg` 文件
+1. Read the Markdown file
+2. Split the content by headings and chunk size
+3. Ask the LLM to return Q&A card JSON
+4. Write the cards into an Anki deck
+5. Export an `.apkg` package
 
-## 项目文件
+## Project Files
 
-- `md_to_anki.py`: 主脚本
-- `setup_api_key.py`: 配置辅助脚本
-- `.env.example`: 安全的环境变量模板
-- `test_sample.md`: 可公开使用的样例 Markdown
-- `tests/test_md_to_anki.py`: 离线测试
+- `md_to_anki.py`: main script
+- `setup_api_key.py`: config helper
+- `.env.example`: safe environment template
+- `test_sample.md`: public sample Markdown file
+- `tests/test_md_to_anki.py`: offline unit tests
 
-## 测试
+## Testing
 
-离线测试：
+Offline tests:
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-在线验证（会调用你的真实 LLM 配置）：
+Live verification with your real LLM configuration:
 
 ```bash
 python test_new_cards.py
 ```
 
-## 常见问题
+## Troubleshooting
 
-### 缺少配置
+### Missing configuration
 
-如果看到 `缺少必要配置`，说明 `.env` 中缺少 `LLM_API_KEY` 或 `LLM_BASE_URL`。
+If you see `缺少必要配置`, your `.env` file is missing `LLM_API_KEY` or `LLM_BASE_URL`.
 
-### JSON 解析失败
+### JSON parsing errors
 
-如果模型没有返回合法 JSON，脚本会打印截断后的响应内容，便于你调整 prompt 或重试。
+If the model does not return valid JSON, the script prints a truncated preview of the response so you can retry or adjust the prompt.
 
-### 没有生成卡片
+### No cards generated
 
-确认输入内容足够具体，并先用 `python test_new_cards.py` 验证 API 是否可用。
-## 许可证
+Make sure the input content is specific enough, and run `python test_new_cards.py` first to verify the API connection.
+
+## License
 
 MIT License
