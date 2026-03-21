@@ -110,4 +110,4 @@ python test_new_cards.py
 
 ## 许可证
 
-MIT License
+见MIT License  jiMIT 许可证  
