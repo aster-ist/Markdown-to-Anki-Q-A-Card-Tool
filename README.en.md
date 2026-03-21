@@ -1,5 +1,7 @@
 # Markdown to Anki Q&A Card Tool
 
+[中文说明](./README.md)
+
 This is a Python command-line tool that converts Markdown notes into Anki `.apkg` packages. The current version uses a Moonshot-compatible Chat Completions API and generates Front/Back Q&A cards with bilingual support, tags, and optional extra notes.
 
 ## Features
