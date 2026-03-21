@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+*.apkg
+O/
+
+.DS_Store
+Thumbs.db
