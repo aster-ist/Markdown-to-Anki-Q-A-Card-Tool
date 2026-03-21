@@ -98,8 +98,6 @@ python test_new_cards.py
 ### 没有生成卡片
 
 确认输入内容足够具体，并先用 `python test_new_cards.py` 验证 API 是否可用。
-
-
 ## 许可证
 
-见MIT License  jiMIT 许可证  
+MIT License
