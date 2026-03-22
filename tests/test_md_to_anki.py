@@ -2,7 +2,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from md_to_anki import ConfigurationError, MarkdownToAnki
+import requests
+
+import md_to_anki
+from md_to_anki import ConfigurationError, MarkdownToAnki, RetryableAPIError
 from setup_api_key import upsert_env_value
 
 
@@ -57,16 +60,7 @@ class MarkdownToAnkiTests(unittest.TestCase):
         self.assertEqual(cards, [])
 
     def test_extract_response_content_retries_when_only_reasoning_content_is_returned(self):
-        class RetryConverter(MarkdownToAnki):
-            def __init__(self):
-                super().__init__(api_key="dummy", base_url="https://example.com")
-                self.retry_tokens = []
-
-            def call_llm_api(self, prompt, max_tokens=2000):
-                self.retry_tokens.append(max_tokens)
-                return "最终答案"
-
-        converter = RetryConverter()
+        converter = MarkdownToAnki(api_key="dummy", base_url="https://example.com")
         result = {
             "choices": [{
                 "message": {
@@ -77,10 +71,101 @@ class MarkdownToAnkiTests(unittest.TestCase):
             }]
         }
 
-        content = converter._extract_response_content(result, "测试 prompt", max_tokens=100)
+        with self.assertRaises(RetryableAPIError) as context:
+            converter._extract_response_content(result, "测试 prompt", max_tokens=100)
 
-        self.assertEqual(content, "最终答案")
-        self.assertEqual(converter.retry_tokens, [512])
+        self.assertEqual(context.exception.next_max_tokens, 512)
+
+    def test_call_llm_api_retries_on_engine_overload(self):
+        class DummyResponse:
+            def __init__(self, status_code, payload):
+                self.status_code = status_code
+                self._payload = payload
+                self.text = str(payload)
+
+            def json(self):
+                return self._payload
+
+            def raise_for_status(self):
+                if self.status_code >= 400:
+                    raise requests.HTTPError(f"{self.status_code} error")
+
+        responses = [
+            DummyResponse(429, {
+                "error": {
+                    "message": "The engine is currently overloaded, please try again later",
+                    "type": "engine_overloaded_error",
+                }
+            }),
+            DummyResponse(200, {
+                "choices": [{
+                    "message": {"content": "重试成功"},
+                    "finish_reason": "stop",
+                }]
+            }),
+        ]
+        sleep_calls = []
+
+        original_post = md_to_anki.requests.post
+        original_sleep = md_to_anki.time.sleep
+
+        try:
+            md_to_anki.requests.post = lambda *args, **kwargs: responses.pop(0)
+            md_to_anki.time.sleep = lambda seconds: sleep_calls.append(seconds)
+
+            converter = MarkdownToAnki(api_key="dummy", base_url="https://example.com")
+            result = converter.call_llm_api("测试 prompt", max_tokens=100)
+        finally:
+            md_to_anki.requests.post = original_post
+            md_to_anki.time.sleep = original_sleep
+
+        self.assertEqual(result, "重试成功")
+        self.assertEqual(sleep_calls, [converter.retry_backoff_seconds])
+
+    def test_call_llm_api_retries_when_content_is_temporarily_empty(self):
+        class DummyResponse:
+            def __init__(self, payload):
+                self.status_code = 200
+                self._payload = payload
+                self.text = str(payload)
+
+            def json(self):
+                return self._payload
+
+            def raise_for_status(self):
+                return None
+
+        responses = [
+            DummyResponse({
+                "choices": [{
+                    "message": {"content": ""},
+                    "finish_reason": "stop",
+                }]
+            }),
+            DummyResponse({
+                "choices": [{
+                    "message": {"content": "最终内容"},
+                    "finish_reason": "stop",
+                }]
+            }),
+        ]
+        sleep_calls = []
+
+        original_post = md_to_anki.requests.post
+        original_sleep = md_to_anki.time.sleep
+
+        try:
+            md_to_anki.requests.post = lambda *args, **kwargs: responses.pop(0)
+            md_to_anki.time.sleep = lambda seconds: sleep_calls.append(seconds)
+
+            converter = MarkdownToAnki(api_key="dummy", base_url="https://example.com")
+            result = converter.call_llm_api("测试 prompt", max_tokens=100)
+        finally:
+            md_to_anki.requests.post = original_post
+            md_to_anki.time.sleep = original_sleep
+
+        self.assertEqual(result, "最终内容")
+        self.assertEqual(sleep_calls, [converter.retry_backoff_seconds])
 
     def test_export_to_apkg_creates_package(self):
         converter = MarkdownToAnki(api_key="dummy", base_url="https://example.com")

@@ -3,6 +3,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 import genanki
@@ -14,12 +15,22 @@ load_dotenv()
 DEFAULT_BASE_URL = "https://api.moonshot.cn"
 DEFAULT_MODEL = "kimi-k2.5"
 DEFAULT_TIMEOUT = 120
+DEFAULT_MAX_ATTEMPTS = 4
+DEFAULT_RETRY_BACKOFF_SECONDS = 3.0
 MAX_CHUNK_SIZE = 500
 MAX_ERROR_PREVIEW = 200
 
 
 class ConfigurationError(ValueError):
     """Raised when required runtime configuration is missing."""
+
+
+class RetryableAPIError(RuntimeError):
+    """Raised when an API response should be retried."""
+
+    def __init__(self, message, next_max_tokens=None):
+        super().__init__(message)
+        self.next_max_tokens = next_max_tokens
 
 
 # 初始化 Anki 模型 - 带标签、Extra 和 Source 的增强版
@@ -110,6 +121,11 @@ class MarkdownToAnki:
         self.base_url = self._resolve_setting(base_url, "LLM_BASE_URL")
         self.model = self._resolve_setting(model, "LLM_MODEL", DEFAULT_MODEL)
         self.timeout = self._parse_timeout(timeout or os.getenv("LLM_TIMEOUT"))
+        self.max_attempts = self._parse_attempts(os.getenv("LLM_MAX_ATTEMPTS"))
+        self.retry_backoff_seconds = self._parse_float(
+            os.getenv("LLM_RETRY_BACKOFF_SECONDS"),
+            DEFAULT_RETRY_BACKOFF_SECONDS,
+        )
         self.deck = None
 
     @staticmethod
@@ -130,6 +146,30 @@ class MarkdownToAnki:
             return DEFAULT_TIMEOUT
 
         return parsed_timeout if parsed_timeout > 0 else DEFAULT_TIMEOUT
+
+    @staticmethod
+    def _parse_attempts(attempt_value):
+        if attempt_value in (None, ""):
+            return DEFAULT_MAX_ATTEMPTS
+
+        try:
+            parsed_attempts = int(attempt_value)
+        except (TypeError, ValueError):
+            return DEFAULT_MAX_ATTEMPTS
+
+        return parsed_attempts if parsed_attempts > 0 else DEFAULT_MAX_ATTEMPTS
+
+    @staticmethod
+    def _parse_float(value, default):
+        if value in (None, ""):
+            return default
+
+        try:
+            parsed_value = float(value)
+        except (TypeError, ValueError):
+            return default
+
+        return parsed_value if parsed_value >= 0 else default
 
     def validate_config(self):
         missing = []
@@ -215,6 +255,35 @@ class MarkdownToAnki:
 
         return normalized_cards
 
+    def _extract_error_details(self, response):
+        try:
+            payload = response.json()
+        except ValueError:
+            return None, None
+
+        error = payload.get("error")
+        if not isinstance(error, dict):
+            return None, None
+
+        return error.get("type"), error.get("message")
+
+    def _should_retry_response(self, response):
+        error_type, error_message = self._extract_error_details(response)
+
+        if response.status_code == 429:
+            return True, error_type, error_message
+        if response.status_code >= 500:
+            return True, error_type, error_message
+        if error_type in {"engine_overloaded_error", "rate_limit_exceeded"}:
+            return True, error_type, error_message
+
+        return False, error_type, error_message
+
+    def _sleep_before_retry(self, attempt, reason):
+        delay_seconds = self.retry_backoff_seconds * attempt
+        print(f"[DEBUG] {reason}，{delay_seconds:.1f} 秒后重试...")
+        time.sleep(delay_seconds)
+
     def call_llm_api(self, prompt, max_tokens=2000):
         """调用 LLM API 生成内容"""
         try:
@@ -224,39 +293,59 @@ class MarkdownToAnki:
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
             }
-            data = {
-                "model": self.model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "你是一个专业的 Anki 卡片制作助手，擅长从学习材料中"
-                            "提取关键知识点并生成高质量的问答卡片。"
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                "max_tokens": max_tokens,
-                "temperature": 1,
-            }
+            current_max_tokens = max_tokens
 
-            print(f"[DEBUG] 请求 URL: {url}")
-            print(f"[DEBUG] 使用模型: {data['model']}")
+            for attempt in range(1, self.max_attempts + 1):
+                data = {
+                    "model": self.model,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": (
+                                "你是一个专业的 Anki 卡片制作助手，擅长从学习材料中"
+                                "提取关键知识点并生成高质量的问答卡片。"
+                            ),
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    "max_tokens": current_max_tokens,
+                    "temperature": 1,
+                }
 
-            response = requests.post(url, headers=headers, json=data, timeout=self.timeout)
+                print(f"[DEBUG] 请求 URL: {url}")
+                print(f"[DEBUG] 使用模型: {data['model']}")
 
-            print(f"[DEBUG] 响应状态码: {response.status_code}")
-            if response.status_code != 200:
-                print(f"[DEBUG] 响应内容: {response.text[:500]}")
+                response = requests.post(url, headers=headers, json=data, timeout=self.timeout)
 
-            response.raise_for_status()
+                print(f"[DEBUG] 响应状态码: {response.status_code}")
+                if response.status_code != 200:
+                    print(f"[DEBUG] 响应内容: {response.text[:500]}")
 
-            try:
-                result = response.json()
-            except ValueError as exc:
-                raise ValueError("API 返回的不是合法 JSON。") from exc
+                should_retry, error_type, error_message = self._should_retry_response(response)
+                if should_retry and attempt < self.max_attempts:
+                    retry_reason = error_type or error_message or f"HTTP {response.status_code}"
+                    self._sleep_before_retry(attempt, f"接口繁忙或限流（{retry_reason}）")
+                    continue
 
-            return self._extract_response_content(result, prompt, max_tokens=max_tokens)
+                response.raise_for_status()
+
+                try:
+                    result = response.json()
+                except ValueError as exc:
+                    raise ValueError("API 返回的不是合法 JSON。") from exc
+
+                try:
+                    return self._extract_response_content(result, prompt, max_tokens=current_max_tokens)
+                except RetryableAPIError as exc:
+                    if attempt >= self.max_attempts:
+                        raise ValueError(str(exc)) from exc
+
+                    if exc.next_max_tokens:
+                        current_max_tokens = exc.next_max_tokens
+
+                    self._sleep_before_retry(attempt, str(exc))
+
+            raise ValueError("超过最大重试次数，API 仍未返回可用内容。")
         except (ConfigurationError, ValueError, requests.RequestException) as exc:
             print(f"API 调用错误: {exc}")
             return None
@@ -291,12 +380,12 @@ class MarkdownToAnki:
         if reasoning_content and finish_reason == "length":
             retry_max_tokens = min(max(max_tokens * 2, 512), 4000)
             if retry_max_tokens > max_tokens:
-                print("[DEBUG] 响应只有 reasoning_content，自动提高 max_tokens 重试一次...")
-                retry_result = self.call_llm_api(prompt, max_tokens=retry_max_tokens)
-                if retry_result:
-                    return retry_result
+                raise RetryableAPIError(
+                    "响应只有 reasoning_content，自动提高 max_tokens 重试一次",
+                    next_max_tokens=retry_max_tokens,
+                )
 
-        raise ValueError("API 返回内容为空。")
+        raise RetryableAPIError("API 返回内容为空。")
 
     @staticmethod
     def _split_large_chunk(chunk):
