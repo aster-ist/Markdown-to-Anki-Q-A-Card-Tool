@@ -121,14 +121,6 @@ python test_new_cards.py
 
 确认输入内容足够具体，并先用 `python test_new_cards.py` 验证 API 是否可用。
 
-## GitHub 发布建议
-
-如果你准备发布到 GitHub：
-
-- 不要提交 `.env`
-- 不要提交 `venv/`
-- 不要提交 `.apkg` 产物
-- 不要提交个人笔记、会话记忆和真实 API Key
 
 ## 许可证
 
