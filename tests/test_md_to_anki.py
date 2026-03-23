@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -260,6 +261,196 @@ class MarkdownToAnkiTests(unittest.TestCase):
         self.assertIn("LLM_API_KEY=new-key", updated_lines)
         self.assertIn("LLM_BASE_URL=https://api.moonshot.cn", updated_lines)
         self.assertIn("LLM_TIMEOUT=120", updated_lines)
+
+    def test_record_failed_chunk_stores_summary_fields(self):
+        converter = MarkdownToAnki(api_key="dummy", base_url="https://example.com")
+        converter.record_failed_chunk(
+            index=3,
+            total_chunks=10,
+            chunk_text="这是一个失败块，用于测试失败清单记录。",
+            source_file="sample.md",
+            reason="未生成卡片",
+        )
+
+        self.assertEqual(len(converter.failed_chunks), 1)
+        self.assertEqual(converter.failed_chunks[0]["index"], 3)
+        self.assertEqual(converter.failed_chunks[0]["source_file"], "sample.md")
+        self.assertEqual(converter.failed_chunks[0]["reason"], "未生成卡片")
+
+    def test_write_failed_chunks_report_creates_markdown_file(self):
+        converter = MarkdownToAnki(api_key="dummy", base_url="https://example.com")
+        converter.record_failed_chunk(
+            index=1,
+            total_chunks=2,
+            chunk_text="# 标题\n失败内容",
+            source_file="sample.md",
+            reason="未生成卡片",
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "cards.apkg"
+            report_path = converter.write_failed_chunks_report(
+                "sample.md",
+                output_path,
+                manifest_file="cards_manifest_sample.json",
+            )
+
+            self.assertIsNotNone(report_path)
+            self.assertTrue(report_path.exists())
+            report_text = report_path.read_text(encoding="utf-8")
+            self.assertIn("Failed Chunks Report", report_text)
+            self.assertIn("Chunk 1/2", report_text)
+            self.assertIn("失败内容", report_text)
+            self.assertIn("Manifest file: cards_manifest_sample.json", report_text)
+            self.assertIn("Retry command: python md_to_anki.py --retry-report", report_text)
+
+    def test_write_and_load_cards_manifest(self):
+        converter = MarkdownToAnki(api_key="dummy", base_url="https://example.com")
+        cards = [{
+            "front": "问题",
+            "back": "答案",
+            "extra": "",
+            "source": "sample.md",
+            "tags": ["测试"],
+        }]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "cards.apkg"
+            manifest_path = converter.write_cards_manifest("sample.md", output_path, "Deck", cards)
+            payload = converter.load_cards_manifest(manifest_path)
+
+        self.assertEqual(payload["deck_name"], "Deck")
+        self.assertEqual(payload["cards"][0]["front"], "问题")
+        self.assertTrue(payload["run_id"])
+
+    def test_manifest_and_failed_report_share_same_run_id(self):
+        converter = MarkdownToAnki(api_key="dummy", base_url="https://example.com")
+        converter.record_failed_chunk(
+            index=1,
+            total_chunks=1,
+            chunk_text="失败内容",
+            source_file="sample.md",
+            reason="未生成卡片",
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "cards.apkg"
+            manifest_path = converter.write_cards_manifest("sample.md", output_path, "Deck", [])
+            report_path = converter.write_failed_chunks_report(
+                "sample.md",
+                output_path,
+                manifest_file=manifest_path,
+            )
+
+        manifest_name = manifest_path.name
+        report_name = report_path.name
+        self.assertIn("_run_", manifest_name)
+        self.assertIn("_run_", report_name)
+        manifest_run_id = manifest_name.split("_run_", 1)[1].rsplit(".", 1)[0]
+        report_run_id = report_name.split("_run_", 1)[1].rsplit(".", 1)[0]
+        self.assertEqual(manifest_run_id, report_run_id)
+
+    def test_load_failed_chunks_report_parses_entries(self):
+        converter = MarkdownToAnki(api_key="dummy", base_url="https://example.com")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_path = Path(temp_dir) / "failed_chunks_sample.md"
+            report_path.write_text(
+                "# Failed Chunks Report\n\n"
+                "## Chunk 2/5\n\n"
+                "- Source file: sample.md\n"
+                "- Reason: 未生成卡片\n"
+                "- Preview: 示例预览\n\n"
+                "```md\n"
+                "## 标题\n失败块内容\n"
+                "```\n",
+                encoding="utf-8",
+            )
+
+            entries = converter.load_failed_chunks_report(report_path)
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["index"], 2)
+        self.assertEqual(entries[0]["total_chunks"], 5)
+        self.assertEqual(entries[0]["source_file"], "sample.md")
+        self.assertIn("失败块内容", entries[0]["chunk_text"])
+
+    def test_process_failed_chunks_report_generates_retry_deck(self):
+        class StubConverter(MarkdownToAnki):
+            def __init__(self):
+                super().__init__(api_key="dummy", base_url="https://example.com")
+
+            def generate_cards_from_text(self, text, source_file=""):
+                return [{
+                    "front": f"Q: {source_file}",
+                    "back": text,
+                    "extra": "",
+                    "source": source_file,
+                    "tags": ["retry"],
+                }]
+
+        converter = StubConverter()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_path = Path(temp_dir) / "failed_chunks_sample.md"
+            output_path = Path(temp_dir) / "retry.apkg"
+            manifest_path = Path(temp_dir) / "cards_manifest_sample.json"
+            manifest_path.write_text(
+                json.dumps({
+                    "input_file": "sample.md",
+                    "output_file": "cards.apkg",
+                    "deck_name": "sample",
+                    "cards": [{
+                        "front": "原始卡片",
+                        "back": "原始答案",
+                        "extra": "",
+                        "source": "sample.md",
+                        "tags": ["original"],
+                    }],
+                }, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            report_path.write_text(
+                "# Failed Chunks Report\n\n"
+                "- Input file: sample.md\n"
+                "- Output file: cards.apkg\n"
+                f"- Manifest file: {manifest_path}\n"
+                "- Failed chunks: 1\n\n"
+                "## Chunk 1/3\n\n"
+                "- Source file: sample.md\n"
+                "- Reason: 未生成卡片\n"
+                "- Preview: 示例预览\n\n"
+                "```md\n"
+                "失败块内容\n"
+                "```\n",
+                encoding="utf-8",
+            )
+
+            success = converter.process_failed_chunks_report(report_path, output_path)
+
+            self.assertTrue(success)
+            self.assertTrue(output_path.exists())
+            self.assertEqual(len(converter.failed_chunks), 0)
+            self.assertEqual(len(converter.deck.notes), 2)
+
+    def test_build_retry_output_path_uses_original_output_name(self):
+        converter = MarkdownToAnki(api_key="dummy", base_url="https://example.com")
+        retry_output = converter.build_retry_output_path(
+            "failed_chunks_demo.md",
+            "D:/tmp/output.apkg",
+        )
+
+        self.assertEqual(Path(retry_output).name, "output_merged.apkg")
+
+    def test_build_retry_command_uses_report_and_merged_output(self):
+        converter = MarkdownToAnki(api_key="dummy", base_url="https://example.com")
+        command = converter.build_retry_command(
+            "D:/tmp/failed_chunks_output_run_20260323_192742.md",
+            "D:/tmp/output.apkg",
+        )
+
+        self.assertIn('--retry-report "D:/tmp/failed_chunks_output_run_20260323_192742.md"', command)
+        self.assertIn('"D:\\tmp\\output_merged.apkg"', command.replace("/", "\\"))
 
 
 if __name__ == "__main__":

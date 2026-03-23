@@ -1,9 +1,11 @@
 import html
+import argparse
 import json
 import os
 import re
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import genanki
@@ -20,6 +22,7 @@ DEFAULT_RETRY_BACKOFF_SECONDS = 3.0
 DEFAULT_REQUEST_INTERVAL_SECONDS = 0.8
 MAX_CHUNK_SIZE = 500
 MAX_ERROR_PREVIEW = 200
+MAX_CHUNK_PREVIEW = 160
 
 
 class ConfigurationError(ValueError):
@@ -132,6 +135,8 @@ class MarkdownToAnki:
             DEFAULT_REQUEST_INTERVAL_SECONDS,
         )
         self.deck = None
+        self.failed_chunks = []
+        self.current_run_id = None
 
     @staticmethod
     def _resolve_setting(explicit_value, env_name, default=""):
@@ -527,6 +532,219 @@ class MarkdownToAnki:
             print(f"API 返回内容: {repaired_result[:MAX_ERROR_PREVIEW]}...")
             return []
 
+    @staticmethod
+    def _make_chunk_preview(text):
+        normalized = re.sub(r"\s+", " ", text).strip()
+        if len(normalized) <= MAX_CHUNK_PREVIEW:
+            return normalized
+        return normalized[:MAX_CHUNK_PREVIEW].rstrip() + "..."
+
+    def _ensure_run_id(self):
+        if not self.current_run_id:
+            self.current_run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return self.current_run_id
+
+    def record_failed_chunk(self, index, total_chunks, chunk_text, source_file, reason):
+        self.failed_chunks.append({
+            "index": index,
+            "total_chunks": total_chunks,
+            "source_file": source_file,
+            "reason": reason,
+            "preview": self._make_chunk_preview(chunk_text),
+            "chunk_text": chunk_text.strip(),
+        })
+
+    def print_failed_chunks_summary(self):
+        if not self.failed_chunks:
+            print("失败块清单：无")
+            return
+
+        print(f"失败块清单：共 {len(self.failed_chunks)} 个")
+        for item in self.failed_chunks:
+            print(
+                f"  - 块 {item['index']}/{item['total_chunks']} | "
+                f"来源: {item['source_file']} | 原因: {item['reason']}"
+            )
+            print(f"    预览: {item['preview']}")
+
+    def write_cards_manifest(self, input_file, output_file, deck_name, cards):
+        output_path = Path(output_file)
+        run_id = self._ensure_run_id()
+        manifest_name = f"cards_manifest_{output_path.stem}_run_{run_id}.json"
+        manifest_path = output_path.parent / manifest_name
+
+        payload = {
+            "input_file": str(input_file),
+            "output_file": str(output_file),
+            "deck_name": deck_name,
+            "run_id": run_id,
+            "cards": cards,
+        }
+        manifest_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(f"成功卡片清单已保存到: {manifest_path}")
+        return manifest_path
+
+    def load_cards_manifest(self, manifest_file):
+        manifest_path = Path(manifest_file)
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        cards = payload.get("cards")
+        if not isinstance(cards, list):
+            raise ValueError(f"成功卡片清单格式无效: {manifest_file}")
+        return payload
+
+    def write_failed_chunks_report(self, input_file, output_file, manifest_file=None):
+        if not self.failed_chunks:
+            return None
+
+        output_path = Path(output_file)
+        run_id = self._ensure_run_id()
+        report_name = f"failed_chunks_{output_path.stem}_run_{run_id}.md"
+        report_path = output_path.parent / report_name
+        retry_command = self.build_retry_command(report_path, output_file)
+
+        lines = [
+            "# Failed Chunks Report",
+            "",
+            f"- Input file: {input_file}",
+            f"- Output file: {output_file}",
+            f"- Manifest file: {manifest_file or ''}",
+            f"- Retry command: {retry_command}",
+            f"- Failed chunks: {len(self.failed_chunks)}",
+            "",
+        ]
+
+        for item in self.failed_chunks:
+            lines.extend([
+                f"## Chunk {item['index']}/{item['total_chunks']}",
+                "",
+                f"- Source file: {item['source_file']}",
+                f"- Reason: {item['reason']}",
+                f"- Preview: {item['preview']}",
+                "",
+                "```md",
+                item["chunk_text"],
+                "```",
+                "",
+            ])
+
+        report_path.write_text("\n".join(lines), encoding="utf-8")
+        print(f"失败块报告已保存到: {report_path}")
+        print(f"补跑命令: {retry_command}")
+        return report_path
+
+    def load_failed_chunks_report_metadata(self, report_file):
+        content = Path(report_file).read_text(encoding="utf-8")
+        metadata = {}
+        for key in ("Input file", "Output file", "Manifest file", "Failed chunks"):
+            match = re.search(rf"- {re.escape(key)}: (.*)", content)
+            metadata[key] = match.group(1).strip() if match else ""
+        return metadata
+
+    def load_failed_chunks_report(self, report_file):
+        report_path = Path(report_file)
+        content = report_path.read_text(encoding="utf-8")
+
+        pattern = re.compile(
+            r"## Chunk (\d+)/(\d+)\n"
+            r"(?:\n)?- Source file: (?P<source>[^\n]+)\n"
+            r"- Reason: (?P<reason>[^\n]+)\n"
+            r"- Preview: (?P<preview>[^\n]*)\n"
+            r"\n```md\n(?P<chunk>.*?)\n```",
+            re.DOTALL,
+        )
+
+        entries = []
+        for match in pattern.finditer(content):
+            entries.append({
+                "index": int(match.group(1)),
+                "total_chunks": int(match.group(2)),
+                "source_file": match.group("source").strip(),
+                "reason": match.group("reason").strip(),
+                "preview": match.group("preview").strip(),
+                "chunk_text": match.group("chunk").strip(),
+            })
+
+        if not entries:
+            raise ValueError(f"未能从失败块报告中解析出任何块: {report_file}")
+
+        return entries
+
+    def build_retry_output_path(self, report_file, original_output_file):
+        if original_output_file:
+            original_path = Path(original_output_file)
+            return original_path.with_name(f"{original_path.stem}_merged.apkg")
+
+        report_path = Path(report_file)
+        return report_path.with_name(f"{report_path.stem}_merged.apkg")
+
+    def build_retry_command(self, report_file, original_output_file):
+        retry_output_path = self.build_retry_output_path(report_file, original_output_file)
+        return (
+            f'python md_to_anki.py --retry-report "{report_file}" '
+            f'"{retry_output_path}"'
+        )
+
+    def process_failed_chunks_report(self, report_file, output_file=None):
+        self.validate_config()
+        self.failed_chunks = []
+        self.current_run_id = None
+
+        metadata = self.load_failed_chunks_report_metadata(report_file)
+        entries = self.load_failed_chunks_report(report_file)
+        original_output_file = metadata.get("Output file", "")
+        manifest_file = metadata.get("Manifest file", "")
+
+        if output_file is None:
+            output_file = self.build_retry_output_path(report_file, original_output_file)
+
+        print(f"读取失败块报告: {report_file}")
+        print(f"待补跑块数: {len(entries)}")
+
+        deck_name = f"{Path(report_file).stem}_retry"
+        base_cards = []
+        if manifest_file:
+            manifest = self.load_cards_manifest(manifest_file)
+            deck_name = manifest.get("deck_name") or deck_name
+            base_cards = manifest.get("cards", [])
+            print(f"读取成功卡片清单: {manifest_file}")
+            print(f"原始成功卡片数: {len(base_cards)}")
+        self.create_deck(deck_name)
+
+        all_cards = list(base_cards)
+        for retry_index, entry in enumerate(entries, start=1):
+            print(
+                f"补跑失败块 {retry_index}/{len(entries)} "
+                f"(原块 {entry['index']}/{entry['total_chunks']})..."
+            )
+            cards = self.generate_cards_from_text(
+                entry["chunk_text"],
+                source_file=entry["source_file"],
+            )
+            all_cards.extend(cards)
+            print(f"  生成 {len(cards)} 张卡片")
+
+            if not cards:
+                self.record_failed_chunk(
+                    index=entry["index"],
+                    total_chunks=entry["total_chunks"],
+                    chunk_text=entry["chunk_text"],
+                    source_file=entry["source_file"],
+                    reason="补跑后仍未生成卡片",
+                )
+
+            if retry_index < len(entries) and self.request_interval_seconds > 0:
+                time.sleep(self.request_interval_seconds)
+
+        print(f"补跑总共生成 {len(all_cards)} 张卡片")
+        self.print_failed_chunks_summary()
+        manifest_path = self.write_cards_manifest(report_file, output_file, deck_name, all_cards)
+        self.write_failed_chunks_report(report_file, output_file, manifest_file=manifest_path)
+        self.add_cards_to_deck(all_cards)
+        return self.export_to_apkg(output_file)
+
     def create_deck(self, deck_name="My Deck"):
         """创建 Anki 牌组"""
         self.deck = genanki.Deck(2023010101, deck_name)
@@ -570,6 +788,8 @@ class MarkdownToAnki:
     def process(self, input_file, output_file):
         """完整处理流程"""
         self.validate_config()
+        self.failed_chunks = []
+        self.current_run_id = None
 
         print(f"读取文件: {input_file}")
         chunks = self.parse_markdown(input_file)
@@ -583,29 +803,69 @@ class MarkdownToAnki:
             cards = self.generate_cards_from_text(chunk, source_file=Path(input_file).name)
             all_cards.extend(cards)
             print(f"  生成 {len(cards)} 张卡片")
+            if not cards:
+                self.record_failed_chunk(
+                    index=index,
+                    total_chunks=len(chunks),
+                    chunk_text=chunk,
+                    source_file=Path(input_file).name,
+                    reason="未生成卡片",
+                )
             if index < len(chunks) and self.request_interval_seconds > 0:
                 time.sleep(self.request_interval_seconds)
 
         print(f"总共生成 {len(all_cards)} 张卡片")
+        self.print_failed_chunks_summary()
+        manifest_path = self.write_cards_manifest(input_file, output_file, Path(input_file).stem, all_cards)
+        self.write_failed_chunks_report(input_file, output_file, manifest_file=manifest_path)
         self.add_cards_to_deck(all_cards)
         return self.export_to_apkg(output_file)
 
 
+def build_parser():
+    parser = argparse.ArgumentParser(
+        description="将 Markdown 笔记或失败块报告转换为 Anki 卡片包。"
+    )
+    parser.add_argument("input", nargs="?", help="输入 Markdown 文件路径")
+    parser.add_argument("output", nargs="?", help="输出 apkg 文件路径")
+    parser.add_argument(
+        "--retry-report",
+        dest="retry_report",
+        help="失败块报告路径。提供后将只补跑报告中的失败块。",
+    )
+    return parser
+
+
 def main():
-    if len(sys.argv) < 3:
-        print("用法: python md_to_anki.py <input.md> <output.apkg>")
+    parser = build_parser()
+    args = parser.parse_args()
+
+    if not args.retry_report and not args.input:
+        parser.error("必须提供输入 Markdown 文件，或使用 --retry-report 指定失败块报告。")
+
+    if args.retry_report and args.input:
+        parser.error("使用 --retry-report 时不需要再提供 input 参数。")
+
+    if not args.retry_report and not args.output:
+        parser.error("普通模式下必须提供 output 参数。")
+
+    input_file = args.input
+    output_file = args.output
+
+    if input_file and not os.path.exists(input_file):
+        print(f"错误：文件不存在 {input_file}")
         sys.exit(1)
 
-    input_file = sys.argv[1]
-    output_file = sys.argv[2]
-
-    if not os.path.exists(input_file):
-        print(f"错误：文件不存在 {input_file}")
+    if args.retry_report and not os.path.exists(args.retry_report):
+        print(f"错误：失败块报告不存在 {args.retry_report}")
         sys.exit(1)
 
     try:
         converter = MarkdownToAnki()
-        success = converter.process(input_file, output_file)
+        if args.retry_report:
+            success = converter.process_failed_chunks_report(args.retry_report, output_file)
+        else:
+            success = converter.process(input_file, output_file)
     except ConfigurationError as exc:
         print(f"配置错误: {exc}")
         sys.exit(1)
