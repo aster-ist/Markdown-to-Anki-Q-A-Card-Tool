@@ -49,6 +49,27 @@ class MarkdownToAnkiTests(unittest.TestCase):
         self.assertEqual(cards[0]["source"], "sample.md")
         self.assertEqual(cards[0]["tags"], ["算法", "基础"])
 
+    def test_parse_llm_cards_repairs_invalid_backslash_escape(self):
+        raw_result = """
+```json
+[
+  {
+    "front": "为何 \\phi(p)=p-1？",
+    "back": "因为 1 到 p-1 都与 p 互质。",
+    "extra": "",
+    "tags": ["数论"]
+  }
+]
+```
+"""
+        raw_result = raw_result.replace("\\\\phi", "\\phi")
+
+        converter = MarkdownToAnki(api_key="dummy", base_url="https://example.com")
+        cards = converter.parse_llm_cards(raw_result, source_file="sample.md")
+
+        self.assertEqual(len(cards), 1)
+        self.assertIn("\\phi", cards[0]["front"])
+
     def test_generate_cards_returns_empty_list_for_invalid_json(self):
         class StubConverter(MarkdownToAnki):
             def call_llm_api(self, prompt, max_tokens=2000):
@@ -120,6 +141,49 @@ class MarkdownToAnkiTests(unittest.TestCase):
             md_to_anki.time.sleep = original_sleep
 
         self.assertEqual(result, "重试成功")
+        self.assertEqual(sleep_calls, [converter.retry_backoff_seconds])
+
+    def test_call_llm_api_retries_on_timeout(self):
+        class DummyResponse:
+            status_code = 200
+            text = ""
+
+            @staticmethod
+            def json():
+                return {
+                    "choices": [{
+                        "message": {"content": "超时后成功"},
+                        "finish_reason": "stop",
+                    }]
+                }
+
+            @staticmethod
+            def raise_for_status():
+                return None
+
+        calls = []
+        sleep_calls = []
+
+        def fake_post(*args, **kwargs):
+            calls.append("called")
+            if len(calls) == 1:
+                raise requests.Timeout("timeout")
+            return DummyResponse()
+
+        original_post = md_to_anki.requests.post
+        original_sleep = md_to_anki.time.sleep
+
+        try:
+            md_to_anki.requests.post = fake_post
+            md_to_anki.time.sleep = lambda seconds: sleep_calls.append(seconds)
+            converter = MarkdownToAnki(api_key="dummy", base_url="https://example.com")
+            result = converter.call_llm_api("测试 prompt", max_tokens=100)
+        finally:
+            md_to_anki.requests.post = original_post
+            md_to_anki.time.sleep = original_sleep
+
+        self.assertEqual(result, "超时后成功")
+        self.assertEqual(len(calls), 2)
         self.assertEqual(sleep_calls, [converter.retry_backoff_seconds])
 
     def test_call_llm_api_retries_when_content_is_temporarily_empty(self):

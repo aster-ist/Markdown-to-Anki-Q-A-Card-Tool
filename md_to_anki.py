@@ -17,6 +17,7 @@ DEFAULT_MODEL = "kimi-k2.5"
 DEFAULT_TIMEOUT = 120
 DEFAULT_MAX_ATTEMPTS = 4
 DEFAULT_RETRY_BACKOFF_SECONDS = 3.0
+DEFAULT_REQUEST_INTERVAL_SECONDS = 0.8
 MAX_CHUNK_SIZE = 500
 MAX_ERROR_PREVIEW = 200
 
@@ -126,6 +127,10 @@ class MarkdownToAnki:
             os.getenv("LLM_RETRY_BACKOFF_SECONDS"),
             DEFAULT_RETRY_BACKOFF_SECONDS,
         )
+        self.request_interval_seconds = self._parse_float(
+            os.getenv("LLM_REQUEST_INTERVAL_SECONDS"),
+            DEFAULT_REQUEST_INTERVAL_SECONDS,
+        )
         self.deck = None
 
     @staticmethod
@@ -203,6 +208,18 @@ class MarkdownToAnki:
         return cleaned.strip()
 
     @staticmethod
+    def _repair_common_json_issues(cleaned_result):
+        repaired = cleaned_result
+
+        # Repair LaTeX-like backslashes such as \phi that are illegal in JSON strings.
+        repaired = re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", repaired)
+
+        # Remove trailing commas before closing braces/brackets.
+        repaired = re.sub(r",(\s*[}\]])", r"\1", repaired)
+
+        return repaired
+
+    @staticmethod
     def _normalize_tags(tags):
         if isinstance(tags, str):
             tags = [tags]
@@ -221,7 +238,10 @@ class MarkdownToAnki:
 
     def parse_llm_cards(self, raw_result, source_file=""):
         cleaned_result = self._clean_llm_response(raw_result)
-        cards = json.loads(cleaned_result)
+        try:
+            cards = json.loads(cleaned_result)
+        except json.JSONDecodeError:
+            cards = json.loads(self._repair_common_json_issues(cleaned_result))
 
         if not isinstance(cards, list):
             raise ValueError("LLM 返回必须是 JSON 数组。")
@@ -314,8 +334,13 @@ class MarkdownToAnki:
 
                 print(f"[DEBUG] 请求 URL: {url}")
                 print(f"[DEBUG] 使用模型: {data['model']}")
-
-                response = requests.post(url, headers=headers, json=data, timeout=self.timeout)
+                try:
+                    response = requests.post(url, headers=headers, json=data, timeout=self.timeout)
+                except (requests.Timeout, requests.ConnectionError) as exc:
+                    if attempt < self.max_attempts:
+                        self._sleep_before_retry(attempt, f"网络超时或连接失败（{exc.__class__.__name__}）")
+                        continue
+                    raise
 
                 print(f"[DEBUG] 响应状态码: {response.status_code}")
                 if response.status_code != 200:
@@ -484,6 +509,22 @@ class MarkdownToAnki:
         except (json.JSONDecodeError, ValueError) as exc:
             print(f"JSON 解析错误: {exc}")
             print(f"API 返回内容: {result[:MAX_ERROR_PREVIEW]}...")
+
+        repair_prompt = (
+            prompt
+            + "\n\n上一次输出不是合法 JSON。请重新输出严格合法的 JSON 数组，"
+              "不要使用 Markdown 代码块，不要输出省略号，不要截断，"
+              "如需写数学符号请避免使用未转义反斜杠。"
+        )
+        repaired_result = self.call_llm_api(repair_prompt, max_tokens=4000)
+        if not repaired_result:
+            return []
+
+        try:
+            return self.parse_llm_cards(repaired_result, source_file=source_file)
+        except (json.JSONDecodeError, ValueError) as exc:
+            print(f"JSON 二次解析错误: {exc}")
+            print(f"API 返回内容: {repaired_result[:MAX_ERROR_PREVIEW]}...")
             return []
 
     def create_deck(self, deck_name="My Deck"):
@@ -542,6 +583,8 @@ class MarkdownToAnki:
             cards = self.generate_cards_from_text(chunk, source_file=Path(input_file).name)
             all_cards.extend(cards)
             print(f"  生成 {len(cards)} 张卡片")
+            if index < len(chunks) and self.request_interval_seconds > 0:
+                time.sleep(self.request_interval_seconds)
 
         print(f"总共生成 {len(all_cards)} 张卡片")
         self.add_cards_to_deck(all_cards)
