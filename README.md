@@ -1,22 +1,22 @@
-# Markdown 转 Anki 问答卡片工具
+# Markdown to Anki Q&A Card Tool
+[中文文档](README_cn.md)
+This is a Python command-line tool that converts Markdown notes into an Anki `.apkg` package. The current version uses a Moonshot-compatible Chat Completions API to generate Front/Back Q&A cards and supports bilingual content, tags, and extra notes.
 
-这是一个 Python 命令行工具，用于把 Markdown 笔记转换成可导入 Anki 的 `.apkg` 包。当前版本使用 Moonshot 兼容的 Chat Completions 接口，生成 Front/Back 问答卡片，支持双语内容、标签和补充说明。
+## Features
 
-## 功能特性
+- Read local Markdown files and chunk by headings/length
+- Call an LLM to automatically extract core knowledge points
+- Generate Front/Back Q&A cards (not Cloze deletion cards)
+- Support `extra` notes, `source`, and `tags`
+- Export as an `.apkg` file that can be imported directly into Anki
+- Clearer error messages for missing configuration, invalid JSON, and missing fields
 
-- 读取本地 Markdown 文件并按标题/长度分块
-- 调用 LLM 自动提取核心知识点
-- 生成 Front/Back 问答卡片，而不是 Cloze 填空卡片
-- 支持 `extra` 补充说明、`source` 来源、`tags` 标签
-- 导出为可直接导入 Anki 的 `.apkg` 文件
-- 对缺失配置、非法 JSON 和字段缺失提供更清晰的错误提示
-
-## 环境要求
+## Requirements
 
 - Python 3.9+
-- 建议使用虚拟环境
+- Virtual environment recommended
 
-## 安装
+## Installation
 
 ```bash
 python -m venv venv
@@ -24,9 +24,9 @@ venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-## 配置
+## Configuration
 
-复制 `.env.example` 为 `.env`，然后填写你的真实配置：
+Copy `.env.example` to `.env`, then fill in your real settings:
 
 ```env
 LLM_API_KEY=your_api_key_here
@@ -35,101 +35,92 @@ LLM_MODEL=kimi-k2.5
 LLM_TIMEOUT=120
 ```
 
-如果只想快速更新 API Key，可以运行：
+If you only want to quickly update the API key, run:
 
 ```bash
 python setup_api_key.py
 ```
 
-这个脚本会更新 `LLM_API_KEY`，同时保留已有的 `LLM_BASE_URL`，如果没有则补上 Moonshot 默认地址。
+This script updates `LLM_API_KEY`, preserves the existing `LLM_BASE_URL`, and adds the Moonshot default address if it is missing.
 
-## 用法
+## Usage
 
 ```bash
 python md_to_anki.py <input.md> <output.apkg>
 ```
 
-示例：
+Example:
 
 ```bash
 python md_to_anki.py test_sample.md output.apkg
 ```
 
-执行流程：
+Execution flow:
 
-1. 读取 Markdown 文件
-2. 按标题与长度切分文本块
-3. 调用 LLM 生成问答卡片 JSON
-4. 将卡片写入 Anki 牌组
-5. 导出 `.apkg` 文件
+1. Read the Markdown file
+2. Split text into chunks by headings and length
+3. Call the LLM to generate Q&A card JSON
+4. Write cards into the Anki deck
+5. Export the `.apkg` file
 
-如果上一次运行生成了 `failed_chunks_*.md` 报告，可以只补跑失败块：
+If the previous run generated a `failed_chunks_*.md` report, you can rerun only the failed chunks:
 
 ```bash
 python md_to_anki.py --retry-report failed_chunks_output_20260323_120000.md retry_output.apkg
 ```
 
-也可以不传输出路径，脚本会自动基于原输出名生成一个合并包，例如 `output_merged.apkg`：
+You can also omit the output path; the script will automatically create a merged package based on the original output name, e.g., `output_merged.apkg`:
 
 ```bash
 python md_to_anki.py --retry-report failed_chunks_output_20260323_120000.md
 ```
 
-补跑时会自动读取同批次生成的 `cards_manifest_*.json`，把“原先成功的卡片 + 这次补跑成功的卡片”一起重新打包成新的 `.apkg`，这样你不需要手动合并主包和补跑包。
+During retry, it automatically reads the `cards_manifest_*.json` generated in the same batch and repacks “previously successful cards + cards that succeed in this retry” into a new `.apkg`. This way, you don’t need to manually merge the main package and the retry package.
 
-每次生成失败块报告时，终端和报告文件顶部还会直接给出一条可复制执行的补跑命令，例如：
+Each time a failed-chunks report is generated, the terminal and the top of the report file provide a copyable retry command, for example:
 
 ```bash
 python md_to_anki.py --retry-report "failed_chunks_output_run_20260323_192742.md" "output_merged.apkg"
 ```
 
-实际使用时，优先直接复制报告里的 `Retry command` 那一行即可。
+In practice, it’s best to copy the `Retry command` line directly from the report.
 
-## 项目文件
+## Project Files
 
-- `md_to_anki.py`: 主脚本
-- `setup_api_key.py`: 配置辅助脚本
-- `.env.example`: 安全的环境变量模板
-- `test_sample.md`: 可公开使用的样例 Markdown
-- `tests/test_md_to_anki.py`: 离线测试
+- `md_to_anki.py`: Main script
+- `setup_api_key.py`: Configuration helper script
+- `.env.example`: Safe environment variable template
+- `test_sample.md`: Public sample Markdown
+- `tests/test_md_to_anki.py`: Offline tests
 
-## 测试
+## Tests
 
-离线测试：
+Offline tests:
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-在线验证（会调用你的真实 LLM 配置）：
+Online validation (uses your real LLM configuration):
 
 ```bash
 python test_new_cards.py
 ```
 
-## 常见问题
+## FAQ
 
-### 缺少配置
+### Missing configuration
 
-如果看到 `缺少必要配置`，说明 `.env` 中缺少 `LLM_API_KEY` 或 `LLM_BASE_URL`。
+If you see `Missing required configuration`, it means `.env` is missing `LLM_API_KEY` or `LLM_BASE_URL`.
 
-### JSON 解析失败
+### JSON parsing failure
 
-如果模型没有返回合法 JSON，脚本会打印截断后的响应内容，便于你调整 prompt 或重试。
+If the model does not return valid JSON, the script prints a truncated response to help you adjust the prompt or retry.
 
-### 没有生成卡片
+### No cards generated
 
-确认输入内容足够具体，并先用 `python test_new_cards.py` 验证 API 是否可用。
+Ensure the input content is specific enough and first verify the API is available with `python test_new_cards.py`.
 
-## GitHub 发布建议
-
-如果你准备发布到 GitHub：
-
-- 不要提交 `.env`
-- 不要提交 `venv/`
-- 不要提交 `.apkg` 产物
-- 不要提交个人笔记、会话记忆和真实 API Key
-
-## 许可证
+## License
 
 MIT License
