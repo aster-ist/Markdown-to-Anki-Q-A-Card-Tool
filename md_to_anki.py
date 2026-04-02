@@ -120,7 +120,14 @@ my_model = genanki.Model(
 
 
 class MarkdownToAnki:
-    def __init__(self, api_key=None, base_url=None, model=None, timeout=None):
+    def __init__(
+        self,
+        api_key=None,
+        base_url=None,
+        model=None,
+        timeout=None,
+        disable_system_proxy=None,
+    ):
         self.api_key = self._resolve_setting(api_key, "LLM_API_KEY")
         self.base_url = self._resolve_setting(base_url, "LLM_BASE_URL")
         self.model = self._resolve_setting(model, "LLM_MODEL", DEFAULT_MODEL)
@@ -133,6 +140,9 @@ class MarkdownToAnki:
         self.request_interval_seconds = self._parse_float(
             os.getenv("LLM_REQUEST_INTERVAL_SECONDS"),
             DEFAULT_REQUEST_INTERVAL_SECONDS,
+        )
+        self.disable_system_proxy = self._parse_bool(
+            disable_system_proxy if disable_system_proxy is not None else os.getenv("LLM_DISABLE_SYSTEM_PROXY")
         )
         self.deck = None
         self.failed_chunks = []
@@ -180,6 +190,21 @@ class MarkdownToAnki:
             return default
 
         return parsed_value if parsed_value >= 0 else default
+
+    @staticmethod
+    def _parse_bool(value, default=False):
+        if value in (None, ""):
+            return default
+
+        if isinstance(value, bool):
+            return value
+
+        normalized = str(value).strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        return default
 
     def validate_config(self):
         missing = []
@@ -309,6 +334,12 @@ class MarkdownToAnki:
         print(f"[DEBUG] {reason}，{delay_seconds:.1f} 秒后重试...")
         time.sleep(delay_seconds)
 
+    def _create_http_session(self):
+        session = requests.Session()
+        if self.disable_system_proxy:
+            session.trust_env = False
+        return session
+
     def call_llm_api(self, prompt, max_tokens=2000):
         """调用 LLM API 生成内容"""
         try:
@@ -319,61 +350,67 @@ class MarkdownToAnki:
                 "Content-Type": "application/json",
             }
             current_max_tokens = max_tokens
+            session = self._create_http_session()
 
-            for attempt in range(1, self.max_attempts + 1):
-                data = {
-                    "model": self.model,
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": (
-                                "你是一个专业的 Anki 卡片制作助手，擅长从学习材料中"
-                                "提取关键知识点并生成高质量的问答卡片。"
-                            ),
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                    "max_tokens": current_max_tokens,
-                    "temperature": 1,
-                }
+            try:
+                for attempt in range(1, self.max_attempts + 1):
+                    data = {
+                        "model": self.model,
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": (
+                                    "你是一个专业的 Anki 卡片制作助手，擅长从学习材料中"
+                                    "提取关键知识点并生成高质量的问答卡片。"
+                                ),
+                            },
+                            {"role": "user", "content": prompt},
+                        ],
+                        "max_tokens": current_max_tokens,
+                        "temperature": 1,
+                    }
 
-                print(f"[DEBUG] 请求 URL: {url}")
-                print(f"[DEBUG] 使用模型: {data['model']}")
-                try:
-                    response = requests.post(url, headers=headers, json=data, timeout=self.timeout)
-                except (requests.Timeout, requests.ConnectionError) as exc:
-                    if attempt < self.max_attempts:
-                        self._sleep_before_retry(attempt, f"网络超时或连接失败（{exc.__class__.__name__}）")
+                    print(f"[DEBUG] 请求 URL: {url}")
+                    print(f"[DEBUG] 使用模型: {data['model']}")
+                    if self.disable_system_proxy:
+                        print("[DEBUG] 已启用 LLM_DISABLE_SYSTEM_PROXY，当前请求将忽略系统代理。")
+                    try:
+                        response = session.post(url, headers=headers, json=data, timeout=self.timeout)
+                    except (requests.Timeout, requests.ConnectionError) as exc:
+                        if attempt < self.max_attempts:
+                            self._sleep_before_retry(attempt, f"网络超时或连接失败（{exc.__class__.__name__}）")
+                            continue
+                        raise
+
+                    print(f"[DEBUG] 响应状态码: {response.status_code}")
+                    if response.status_code != 200:
+                        print(f"[DEBUG] 响应内容: {response.text[:500]}")
+
+                    should_retry, error_type, error_message = self._should_retry_response(response)
+                    if should_retry and attempt < self.max_attempts:
+                        retry_reason = error_type or error_message or f"HTTP {response.status_code}"
+                        self._sleep_before_retry(attempt, f"接口繁忙或限流（{retry_reason}）")
                         continue
-                    raise
 
-                print(f"[DEBUG] 响应状态码: {response.status_code}")
-                if response.status_code != 200:
-                    print(f"[DEBUG] 响应内容: {response.text[:500]}")
+                    response.raise_for_status()
 
-                should_retry, error_type, error_message = self._should_retry_response(response)
-                if should_retry and attempt < self.max_attempts:
-                    retry_reason = error_type or error_message or f"HTTP {response.status_code}"
-                    self._sleep_before_retry(attempt, f"接口繁忙或限流（{retry_reason}）")
-                    continue
+                    try:
+                        result = response.json()
+                    except ValueError as exc:
+                        raise ValueError("API 返回的不是合法 JSON。") from exc
 
-                response.raise_for_status()
+                    try:
+                        return self._extract_response_content(result, prompt, max_tokens=current_max_tokens)
+                    except RetryableAPIError as exc:
+                        if attempt >= self.max_attempts:
+                            raise ValueError(str(exc)) from exc
 
-                try:
-                    result = response.json()
-                except ValueError as exc:
-                    raise ValueError("API 返回的不是合法 JSON。") from exc
+                        if exc.next_max_tokens:
+                            current_max_tokens = exc.next_max_tokens
 
-                try:
-                    return self._extract_response_content(result, prompt, max_tokens=current_max_tokens)
-                except RetryableAPIError as exc:
-                    if attempt >= self.max_attempts:
-                        raise ValueError(str(exc)) from exc
-
-                    if exc.next_max_tokens:
-                        current_max_tokens = exc.next_max_tokens
-
-                    self._sleep_before_retry(attempt, str(exc))
+                        self._sleep_before_retry(attempt, str(exc))
+            finally:
+                session.close()
 
             raise ValueError("超过最大重试次数，API 仍未返回可用内容。")
         except (ConfigurationError, ValueError, requests.RequestException) as exc:
@@ -836,21 +873,33 @@ def build_parser():
     return parser
 
 
+def resolve_cli_files(parser, args):
+    input_file = args.input
+    output_file = args.output
+
+    if args.retry_report:
+        if input_file and not output_file:
+            output_file = input_file
+            input_file = None
+        elif input_file and output_file:
+            parser.error("使用 --retry-report 时不需要再提供 input 参数。")
+
+        return input_file, output_file
+
+    if not input_file:
+        parser.error("必须提供输入 Markdown 文件，或使用 --retry-report 指定失败块报告。")
+
+    if not output_file:
+        parser.error("普通模式下必须提供 output 参数。")
+
+    return input_file, output_file
+
+
 def main():
     parser = build_parser()
     args = parser.parse_args()
 
-    if not args.retry_report and not args.input:
-        parser.error("必须提供输入 Markdown 文件，或使用 --retry-report 指定失败块报告。")
-
-    if args.retry_report and args.input:
-        parser.error("使用 --retry-report 时不需要再提供 input 参数。")
-
-    if not args.retry_report and not args.output:
-        parser.error("普通模式下必须提供 output 参数。")
-
-    input_file = args.input
-    output_file = args.output
+    input_file, output_file = resolve_cli_files(parser, args)
 
     if input_file and not os.path.exists(input_file):
         print(f"错误：文件不存在 {input_file}")

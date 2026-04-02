@@ -10,7 +10,60 @@ from md_to_anki import ConfigurationError, MarkdownToAnki, RetryableAPIError
 from setup_api_key import upsert_env_value
 
 
+class DummySession:
+    def __init__(self, post_handler):
+        self.post = post_handler
+        self.trust_env = True
+
+    def close(self):
+        return None
+
+
 class MarkdownToAnkiTests(unittest.TestCase):
+    def test_disable_system_proxy_flag_can_be_enabled_from_env_style_value(self):
+        converter = MarkdownToAnki(
+            api_key="dummy",
+            base_url="https://example.com",
+            disable_system_proxy="1",
+        )
+
+        self.assertTrue(converter.disable_system_proxy)
+
+    def test_create_http_session_ignores_system_proxy_when_enabled(self):
+        converter = MarkdownToAnki(
+            api_key="dummy",
+            base_url="https://example.com",
+            disable_system_proxy=True,
+        )
+
+        session = converter._create_http_session()
+        try:
+            self.assertFalse(session.trust_env)
+        finally:
+            session.close()
+
+    def test_create_http_session_uses_system_proxy_by_default(self):
+        converter = MarkdownToAnki(api_key="dummy", base_url="https://example.com")
+
+        session = converter._create_http_session()
+        try:
+            self.assertTrue(session.trust_env)
+        finally:
+            session.close()
+
+    def test_resolve_cli_files_uses_single_positional_as_output_for_retry_report(self):
+        parser = md_to_anki.build_parser()
+        args = parser.parse_args([
+            "--retry-report",
+            "failed_chunks_demo.md",
+            "output_merged.apkg",
+        ])
+
+        input_file, output_file = md_to_anki.resolve_cli_files(parser, args)
+
+        self.assertIsNone(input_file)
+        self.assertEqual(output_file, "output_merged.apkg")
+
     def test_validate_config_raises_when_required_values_are_missing(self):
         converter = MarkdownToAnki(api_key="", base_url="")
 
@@ -127,18 +180,14 @@ class MarkdownToAnkiTests(unittest.TestCase):
             }),
         ]
         sleep_calls = []
-
-        original_post = md_to_anki.requests.post
         original_sleep = md_to_anki.time.sleep
+        converter = MarkdownToAnki(api_key="dummy", base_url="https://example.com")
 
         try:
-            md_to_anki.requests.post = lambda *args, **kwargs: responses.pop(0)
             md_to_anki.time.sleep = lambda seconds: sleep_calls.append(seconds)
-
-            converter = MarkdownToAnki(api_key="dummy", base_url="https://example.com")
+            converter._create_http_session = lambda: DummySession(lambda *args, **kwargs: responses.pop(0))
             result = converter.call_llm_api("测试 prompt", max_tokens=100)
         finally:
-            md_to_anki.requests.post = original_post
             md_to_anki.time.sleep = original_sleep
 
         self.assertEqual(result, "重试成功")
@@ -171,16 +220,14 @@ class MarkdownToAnkiTests(unittest.TestCase):
                 raise requests.Timeout("timeout")
             return DummyResponse()
 
-        original_post = md_to_anki.requests.post
         original_sleep = md_to_anki.time.sleep
+        converter = MarkdownToAnki(api_key="dummy", base_url="https://example.com")
 
         try:
-            md_to_anki.requests.post = fake_post
             md_to_anki.time.sleep = lambda seconds: sleep_calls.append(seconds)
-            converter = MarkdownToAnki(api_key="dummy", base_url="https://example.com")
+            converter._create_http_session = lambda: DummySession(fake_post)
             result = converter.call_llm_api("测试 prompt", max_tokens=100)
         finally:
-            md_to_anki.requests.post = original_post
             md_to_anki.time.sleep = original_sleep
 
         self.assertEqual(result, "超时后成功")
@@ -215,18 +262,14 @@ class MarkdownToAnkiTests(unittest.TestCase):
             }),
         ]
         sleep_calls = []
-
-        original_post = md_to_anki.requests.post
         original_sleep = md_to_anki.time.sleep
+        converter = MarkdownToAnki(api_key="dummy", base_url="https://example.com")
 
         try:
-            md_to_anki.requests.post = lambda *args, **kwargs: responses.pop(0)
             md_to_anki.time.sleep = lambda seconds: sleep_calls.append(seconds)
-
-            converter = MarkdownToAnki(api_key="dummy", base_url="https://example.com")
+            converter._create_http_session = lambda: DummySession(lambda *args, **kwargs: responses.pop(0))
             result = converter.call_llm_api("测试 prompt", max_tokens=100)
         finally:
-            md_to_anki.requests.post = original_post
             md_to_anki.time.sleep = original_sleep
 
         self.assertEqual(result, "最终内容")

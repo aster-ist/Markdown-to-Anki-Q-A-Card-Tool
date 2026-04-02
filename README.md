@@ -1,5 +1,6 @@
 # Markdown to Anki Q&A Card Tool
 [中文文档](README_cn.md)
+
 This is a Python command-line tool that converts Markdown notes into an Anki `.apkg` package. The current version uses a Moonshot-compatible Chat Completions API to generate Front/Back Q&A cards and supports bilingual content, tags, and extra notes.
 
 ## Features
@@ -9,7 +10,7 @@ This is a Python command-line tool that converts Markdown notes into an Anki `.a
 - Generate Front/Back Q&A cards (not Cloze deletion cards)
 - Support `extra` notes, `source`, and `tags`
 - Export as an `.apkg` file that can be imported directly into Anki
-- Clearer error messages for missing configuration, invalid JSON, and missing fields
+- Clearer error messages for missing configuration, invalid JSON, missing fields, and proxy-related failures
 
 ## Requirements
 
@@ -26,13 +27,14 @@ pip install -r requirements.txt
 
 ## Configuration
 
-Copy `.env.example` to `.env`, then fill in your real settings:
+Copy the project-root `.env.example` file to a project-root `.env` file, then fill in your real settings:
 
 ```env
 LLM_API_KEY=your_api_key_here
 LLM_BASE_URL=https://api.moonshot.cn
 LLM_MODEL=kimi-k2.5
 LLM_TIMEOUT=120
+LLM_DISABLE_SYSTEM_PROXY=0
 ```
 
 If you only want to quickly update the API key, run:
@@ -42,6 +44,12 @@ python setup_api_key.py
 ```
 
 This script updates `LLM_API_KEY`, preserves the existing `LLM_BASE_URL`, and adds the Moonshot default address if it is missing.
+
+If you are running Clash or another system proxy and see `ProxyError`, you can change the following setting in the project-root `.env` file to `1` so requests to Moonshot bypass the system proxy and connect directly:
+
+```env
+LLM_DISABLE_SYSTEM_PROXY=1
+```
 
 ## Usage
 
@@ -75,7 +83,7 @@ You can also omit the output path; the script will automatically create a merged
 python md_to_anki.py --retry-report failed_chunks_output_20260323_120000.md
 ```
 
-During retry, it automatically reads the `cards_manifest_*.json` generated in the same batch and repacks “previously successful cards + cards that succeed in this retry” into a new `.apkg`. This way, you don’t need to manually merge the main package and the retry package.
+During retry, it automatically reads the `cards_manifest_*.json` generated in the same batch and repacks “previously successful cards + cards that succeed in this retry” into a new `.apkg`. This way, you do not need to manually merge the main package and the retry package.
 
 Each time a failed-chunks report is generated, the terminal and the top of the report file provide a copyable retry command, for example:
 
@@ -83,7 +91,7 @@ Each time a failed-chunks report is generated, the terminal and the top of the r
 python md_to_anki.py --retry-report "failed_chunks_output_run_20260323_192742.md" "output_merged.apkg"
 ```
 
-In practice, it’s best to copy the `Retry command` line directly from the report.
+In practice, it is best to copy the `Retry command` line directly from the report.
 
 ## Project Files
 
@@ -120,6 +128,18 @@ If the model does not return valid JSON, the script prints a truncated response 
 ### No cards generated
 
 Ensure the input content is specific enough and first verify the API is available with `python test_new_cards.py`.
+
+### ProxyError / proxy disconnects
+
+If logs show `ProxyError`, `Unable to connect to proxy`, or an intermittent local proxy failure, enable this in the project-root `.env` file:
+
+```env
+LLM_DISABLE_SYSTEM_PROXY=1
+```
+
+After enabling it, the script ignores the Windows system proxy and connects directly to `LLM_BASE_URL`.
+
+This setting is edited in the project-root `.env` file; if you do not have one yet, copy it from the project-root `.env.example` file first.
 
 ## License
 

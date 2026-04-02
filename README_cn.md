@@ -9,7 +9,7 @@
 - 生成 Front/Back 问答卡片，而不是 Cloze 填空卡片
 - 支持 `extra` 补充说明、`source` 来源、`tags` 标签
 - 导出为可直接导入 Anki 的 `.apkg` 文件
-- 对缺失配置、非法 JSON 和字段缺失提供更清晰的错误提示
+- 对缺失配置、非法 JSON、字段缺失和代理相关问题提供更清晰的错误提示
 
 ## 环境要求
 
@@ -26,13 +26,14 @@ pip install -r requirements.txt
 
 ## 配置
 
-复制 `.env.example` 为 `.env`，然后填写你的真实配置：
+复制项目根目录下的 `.env.example` 为项目根目录下的 `.env`，然后填写你的真实配置：
 
 ```env
 LLM_API_KEY=your_api_key_here
 LLM_BASE_URL=https://api.moonshot.cn
 LLM_MODEL=kimi-k2.5
 LLM_TIMEOUT=120
+LLM_DISABLE_SYSTEM_PROXY=0
 ```
 
 如果只想快速更新 API Key，可以运行：
@@ -42,6 +43,12 @@ python setup_api_key.py
 ```
 
 这个脚本会更新 `LLM_API_KEY`，同时保留已有的 `LLM_BASE_URL`，如果没有则补上 Moonshot 默认地址。
+
+如果你本机开了 Clash 或其他系统代理，且遇到 `ProxyError`，可以在项目根目录下的 `.env` 文件里把下面这项改成 `1`，让脚本请求 Moonshot 时绕过系统代理直连：
+
+```env
+LLM_DISABLE_SYSTEM_PROXY=1
+```
 
 ## 用法
 
@@ -62,6 +69,28 @@ python md_to_anki.py test_sample.md output.apkg
 3. 调用 LLM 生成问答卡片 JSON
 4. 将卡片写入 Anki 牌组
 5. 导出 `.apkg` 文件
+
+如果上一次运行生成了 `failed_chunks_*.md` 报告，可以只补跑失败块：
+
+```bash
+python md_to_anki.py --retry-report failed_chunks_output_20260323_120000.md retry_output.apkg
+```
+
+也可以不传输出路径，脚本会自动基于原输出名生成一个合并包，例如 `output_merged.apkg`：
+
+```bash
+python md_to_anki.py --retry-report failed_chunks_output_20260323_120000.md
+```
+
+补跑时会自动读取同批次生成的 `cards_manifest_*.json`，把“原先成功的卡片 + 这次补跑成功的卡片”一起重新打包成新的 `.apkg`，这样你不需要手动合并主包和补跑包。
+
+每次生成失败块报告时，终端和报告文件顶部还会直接给出一条可复制执行的补跑命令，例如：
+
+```bash
+python md_to_anki.py --retry-report "failed_chunks_output_run_20260323_192742.md" "output_merged.apkg"
+```
+
+实际使用时，优先直接复制报告里的 `Retry command` 那一行即可。
 
 ## 项目文件
 
@@ -98,6 +127,19 @@ python test_new_cards.py
 ### 没有生成卡片
 
 确认输入内容足够具体，并先用 `python test_new_cards.py` 验证 API 是否可用。
+
+### ProxyError / 代理断连
+
+如果日志里出现 `ProxyError`、`Unable to connect to proxy` 或本地代理间歇性断连，可以在项目根目录下的 `.env` 文件中启用：
+
+```env
+LLM_DISABLE_SYSTEM_PROXY=1
+```
+
+启用后，脚本会忽略 Windows 系统代理，直接连接 `LLM_BASE_URL`。
+
+这个参数的修改位置就是项目根目录下的 `.env` 文件；如果还没有这个文件，先从项目根目录下的 `.env.example` 复制一份再改。
+
 ## 许可证
 
 MIT License
