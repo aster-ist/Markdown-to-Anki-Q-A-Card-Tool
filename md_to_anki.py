@@ -23,6 +23,7 @@ DEFAULT_REQUEST_INTERVAL_SECONDS = 0.8
 MAX_CHUNK_SIZE = 500
 MAX_ERROR_PREVIEW = 200
 MAX_CHUNK_PREVIEW = 160
+MERGED_OUTPUT_SUFFIX_PATTERN = re.compile(r"(?:_merged)+$")
 
 
 class ConfigurationError(ValueError):
@@ -489,6 +490,11 @@ class MarkdownToAnki:
 
         return [item for item in split_chunks if item]
 
+    @staticmethod
+    def _is_heading_only_chunk(chunk):
+        lines = [line.strip() for line in chunk.splitlines() if line.strip()]
+        return bool(lines) and all(re.match(r"^#{1,6}\s+\S", line) for line in lines)
+
     def parse_markdown(self, file_path):
         """读取 Markdown 文件并按段落/标题分块"""
         with open(file_path, "r", encoding="utf-8") as handle:
@@ -499,8 +505,20 @@ class MarkdownToAnki:
         chunks = [chunk.strip() for chunk in chunks if chunk.strip()]
 
         final_chunks = []
+        pending_headings = []
         for chunk in chunks:
+            if self._is_heading_only_chunk(chunk):
+                pending_headings.append(chunk)
+                continue
+
+            if pending_headings:
+                chunk = "\n".join(pending_headings + [chunk]).strip()
+                pending_headings = []
+
             final_chunks.extend(self._split_large_chunk(chunk))
+
+        if pending_headings:
+            print(f"[DEBUG] 跳过 {len(pending_headings)} 个仅包含标题的尾部分块")
 
         return final_chunks
 
@@ -712,7 +730,8 @@ class MarkdownToAnki:
     def build_retry_output_path(self, report_file, original_output_file):
         if original_output_file:
             original_path = Path(original_output_file)
-            return original_path.with_name(f"{original_path.stem}_merged.apkg")
+            normalized_stem = MERGED_OUTPUT_SUFFIX_PATTERN.sub("", original_path.stem)
+            return original_path.with_name(f"{normalized_stem}_merged.apkg")
 
         report_path = Path(report_file)
         return report_path.with_name(f"{report_path.stem}_merged.apkg")
@@ -731,6 +750,7 @@ class MarkdownToAnki:
 
         metadata = self.load_failed_chunks_report_metadata(report_file)
         entries = self.load_failed_chunks_report(report_file)
+        original_input_file = metadata.get("Input file", "") or str(report_file)
         original_output_file = metadata.get("Output file", "")
         manifest_file = metadata.get("Manifest file", "")
 
@@ -751,16 +771,29 @@ class MarkdownToAnki:
         self.create_deck(deck_name)
 
         all_cards = list(base_cards)
+        retry_generated_cards = 0
         for retry_index, entry in enumerate(entries, start=1):
             print(
                 f"补跑失败块 {retry_index}/{len(entries)} "
                 f"(原块 {entry['index']}/{entry['total_chunks']})..."
             )
+            if self._is_heading_only_chunk(entry["chunk_text"]):
+                print("  跳过：失败块仅包含标题，无法单独补跑，请重新运行原始 Markdown 文件")
+                self.record_failed_chunk(
+                    index=entry["index"],
+                    total_chunks=entry["total_chunks"],
+                    chunk_text=entry["chunk_text"],
+                    source_file=entry["source_file"],
+                    reason="失败块仅包含标题，请重新运行原始 Markdown 文件",
+                )
+                continue
+
             cards = self.generate_cards_from_text(
                 entry["chunk_text"],
                 source_file=entry["source_file"],
             )
             all_cards.extend(cards)
+            retry_generated_cards += len(cards)
             print(f"  生成 {len(cards)} 张卡片")
 
             if not cards:
@@ -775,10 +808,11 @@ class MarkdownToAnki:
             if retry_index < len(entries) and self.request_interval_seconds > 0:
                 time.sleep(self.request_interval_seconds)
 
-        print(f"补跑总共生成 {len(all_cards)} 张卡片")
+        print(f"补跑新增 {retry_generated_cards} 张卡片")
+        print(f"合并后总共 {len(all_cards)} 张卡片")
         self.print_failed_chunks_summary()
-        manifest_path = self.write_cards_manifest(report_file, output_file, deck_name, all_cards)
-        self.write_failed_chunks_report(report_file, output_file, manifest_file=manifest_path)
+        manifest_path = self.write_cards_manifest(original_input_file, output_file, deck_name, all_cards)
+        self.write_failed_chunks_report(original_input_file, output_file, manifest_file=manifest_path)
         self.add_cards_to_deck(all_cards)
         return self.export_to_apkg(output_file)
 

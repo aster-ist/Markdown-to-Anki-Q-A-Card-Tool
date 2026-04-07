@@ -83,6 +83,25 @@ class MarkdownToAnkiTests(unittest.TestCase):
         self.assertGreater(len(chunks), 1)
         self.assertTrue(all(len(chunk) <= 500 for chunk in chunks))
 
+    def test_parse_markdown_merges_heading_only_chunk_with_following_content(self):
+        markdown = (
+            "## Section 1: Short-Answer Quiz\n"
+            "## 第一部分：简答题测验\n\n"
+            "Instructions: Answer the following questions.\n"
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_path = Path(temp_dir) / "headings.md"
+            input_path.write_text(markdown, encoding="utf-8")
+
+            converter = MarkdownToAnki(api_key="dummy", base_url="https://example.com")
+            chunks = converter.parse_markdown(str(input_path))
+
+        self.assertEqual(len(chunks), 1)
+        self.assertIn("## Section 1: Short-Answer Quiz", chunks[0])
+        self.assertIn("## 第一部分：简答题测验", chunks[0])
+        self.assertIn("Instructions: Answer the following questions.", chunks[0])
+
     def test_parse_llm_cards_accepts_fenced_json(self):
         raw_result = """
 ```json
@@ -476,11 +495,72 @@ class MarkdownToAnkiTests(unittest.TestCase):
             self.assertEqual(len(converter.failed_chunks), 0)
             self.assertEqual(len(converter.deck.notes), 2)
 
+    def test_process_failed_chunks_report_skips_heading_only_entry_from_old_report(self):
+        class StubConverter(MarkdownToAnki):
+            def __init__(self):
+                super().__init__(api_key="dummy", base_url="https://example.com")
+                self.generate_calls = 0
+
+            def generate_cards_from_text(self, text, source_file=""):
+                self.generate_calls += 1
+                return []
+
+        converter = StubConverter()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_path = Path(temp_dir) / "failed_chunks_sample.md"
+            output_path = Path(temp_dir) / "retry.apkg"
+            manifest_path = Path(temp_dir) / "cards_manifest_sample.json"
+            manifest_path.write_text(
+                json.dumps({
+                    "input_file": "sample.md",
+                    "output_file": "cards.apkg",
+                    "deck_name": "sample",
+                    "cards": [],
+                }, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            report_path.write_text(
+                "# Failed Chunks Report\n\n"
+                "- Input file: sample.md\n"
+                "- Output file: cards.apkg\n"
+                f"- Manifest file: {manifest_path}\n"
+                "- Failed chunks: 1\n\n"
+                "## Chunk 1/3\n\n"
+                "- Source file: sample.md\n"
+                "- Reason: 未生成卡片\n"
+                "- Preview: ## Section 1: Short-Answer Quiz\n\n"
+                "```md\n"
+                "## Section 1: Short-Answer Quiz\n"
+                "```\n",
+                encoding="utf-8",
+            )
+
+            success = converter.process_failed_chunks_report(report_path, output_path)
+
+            self.assertTrue(success)
+            self.assertTrue(output_path.exists())
+            self.assertEqual(converter.generate_calls, 0)
+            self.assertEqual(len(converter.failed_chunks), 1)
+            self.assertEqual(
+                converter.failed_chunks[0]["reason"],
+                "失败块仅包含标题，请重新运行原始 Markdown 文件",
+            )
+
     def test_build_retry_output_path_uses_original_output_name(self):
         converter = MarkdownToAnki(api_key="dummy", base_url="https://example.com")
         retry_output = converter.build_retry_output_path(
             "failed_chunks_demo.md",
             "D:/tmp/output.apkg",
+        )
+
+        self.assertEqual(Path(retry_output).name, "output_merged.apkg")
+
+    def test_build_retry_output_path_does_not_append_merged_repeatedly(self):
+        converter = MarkdownToAnki(api_key="dummy", base_url="https://example.com")
+        retry_output = converter.build_retry_output_path(
+            "failed_chunks_demo.md",
+            "D:/tmp/output_merged.apkg",
         )
 
         self.assertEqual(Path(retry_output).name, "output_merged.apkg")
